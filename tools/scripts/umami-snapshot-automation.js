@@ -106,8 +106,10 @@ async function validateRemotePR(api, pr, dryRun) {
   const commits=await api.pages(`pulls/${pr.number}/commits`);
   requireValid(commits.length===comparison.total_commits);
   for(const commit of commits) {
-    requireValid(commit.author?.login===BOT && commit.committer?.login===BOT && commit.commit.verification?.verified===true);
-    const provenance=commit.commit.message.match(/\nUmami-Run: (\d+)\nUmami-Source: ([a-f0-9]{40})\nUmami-Mode: (production|dry-run)\n/);
+    // GitHub signs API-created App commits as web-flow while preserving the
+    // authenticated App author; it also strips the final message newline.
+    requireValid(commit.author?.login===BOT && [BOT,"web-flow"].includes(commit.committer?.login) && commit.commit.verification?.verified===true);
+    const provenance=commit.commit.message.match(/\nUmami-Run: (\d+)\nUmami-Source: ([a-f0-9]{40})\nUmami-Mode: (production|dry-run)(?:\n|$)/);
     requireValid(provenance && provenance[3]===(dryRun?"dry-run":"production"));
     const run=await api.read(`actions/runs/${provenance[1]}`);
     requireValid(run.path===WORKFLOW && run.head_sha===provenance[2] && run.head_repository?.full_name===REPO);
@@ -187,7 +189,12 @@ async function runAutomation({env=process.env, api, capture=captureScreenshot, w
   const base=pr ? pr.head.sha : main.object.sha;
   const image=await capture(env.UMAMI_SHARE_URL);
   const snapshot=buildSnapshot({readme:(await api.blob(base,"README.md")).toString(),previousImage:await api.blob(base,IMAGE),image,now});
-  if(snapshot.state==="UNCHANGED")return {state:"UNCHANGED"};
+  if(snapshot.state==="UNCHANGED") {
+    // A dry-run retry may finish checks/cleanup of its existing test PR without
+    // producing any content change. Production no-diff never enrolls or merges.
+    if(dryRun && pr)return {state:await finishPR(api,pr.number,base,true,wait),pr:pr.number};
+    return {state:"UNCHANGED"};
+  }
   const closed=await api.pages("pulls?state=closed&base=main&sort=updated&direction=desc");
   for(const old of closed.filter(p=>p.head?.ref?.startsWith(BRANCH_PREFIX))) {
     identify(old,{dryRun:old.body?.includes("Mode: dry-run\n")});

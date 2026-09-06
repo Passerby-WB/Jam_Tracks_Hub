@@ -153,8 +153,11 @@ may enroll in native SQUASH auto-merge without daily user intervention.
 
 The writer validates the exact repository, main base, machine branch namespace,
 App PR author, signed App-only commits, generating workflow/run provenance,
-mergeability, file paths, file modes and README subrange. Enrollment is bound to
-the validated head SHA. Required checks are matched by name, head SHA and producer
+mergeability, file paths, file modes and README subrange.
+GitHub may record `web-flow` as the signing committer;
+the author must still be the exact App and signature verification must succeed.
+GitHub's optional final commit-message newline is not part of provenance.
+Enrollment is bound to the validated head SHA. Required checks are matched by name, head SHA and producer
 (GitHub Actions / Cloudflare). GitHub enforces main rules while checks run; the
 writer rejects failed, cancelled, timed-out, skipped or neutral check results.
 It never invokes direct merge, administrator merge or a bypass fallback.
@@ -258,6 +261,8 @@ auto-merge. A no-diff result is not proof of PR/check startup. Production/main m
 stay unchanged throughout this dry test. After user-authorized implementation
 merge, scheduled main runs use production mode; explicit main dispatch with
 `dry_run=false` has the same narrowly authorized production behavior.
+An unchanged dry-run retry may finish check verification and close its existing
+test PR; it creates no new commit/branch/PR and never enrolls in auto-merge.
 
 ### Rollback
 

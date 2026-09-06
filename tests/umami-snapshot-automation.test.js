@@ -57,6 +57,14 @@ test("required checks must match producer, SHA, latest attempt and positive succ
   const rerun=runs();rerun.push({...rerun[0],id:50,status:"in_progress",conclusion:null});assert.equal(a.requiredChecks(rerun,SHA),"PENDING");
 });
 test("remote PR passes data, signed App commits and workflow provenance gates",async()=>{const api=fixture();assert.equal((await a.validateRemotePR(api,api.record,false)).length,3);});
+test("GitHub-signed web-flow committer and trimmed message preserve strict App provenance",async()=>{
+  const api=fixture(),pages=api.pages;
+  api.pages=async path=>{const rows=await pages(path);if(path.endsWith("/commits")){rows[0].committer.login="web-flow";rows[0].commit.message=rows[0].commit.message.trimEnd();}return rows;};
+  assert.equal((await a.validateRemotePR(api,api.record,false)).length,3);
+  const signedPages=api.pages;
+  api.pages=async path=>{const rows=await signedPages(path);if(path.endsWith("/commits"))rows[0].commit.verification.verified=false;return rows;};
+  await assert.rejects(a.validateRemotePR(api,api.record,false));
+});
 test("remote gate rejects nonallowlisted code before retrieving its contents",async()=>{
   const api=fixture();api.files[2]={filename:"worker.js",status:"modified"};await assert.rejects(a.validateRemotePR(api,api.record,false));assert.equal(api.writes.length,0);
 });
@@ -95,6 +103,14 @@ test("cleanup rejects main, human branches, unmerged production PR and changed t
 });
 test("no image diff makes no remote mutation or branch",async()=>{
   const api=fixture();assert.deepEqual(await a.runAutomation({env,api,capture:async()=>image,now:"2026-09-06"}),{state:"UNCHANGED"});assert.equal(api.writes.length,0);assert.equal(api.mutations.length,0);
+});
+test("unchanged dry-run retry only completes existing PR checks and cleanup",async()=>{
+  const api=fixture({dryRun:true}),pages=api.pages;
+  api.pages=async path=>path.startsWith("pulls?state=open")?[api.record]:pages(path);
+  assert.equal((await a.runAutomation({env:{...env,UMAMI_DRY_RUN:"true"},api,capture:async()=>image,now:"2026-09-06",wait:async()=>{}})).state,"DRY_RUN_PASS");
+  assert.equal(api.mutations.length,0);
+  assert.deepEqual(api.writes.map(w=>w.method),["PATCH","DELETE"]);
+  assert.equal(api.writes[0].body.state,"closed");
 });
 test("GitHub error bodies and credentials are never surfaced",async()=>{
   const api=new a.GitHub("PRIVATE_TOKEN","READ_TOKEN",async()=>({ok:false,status:403,json:()=>({message:"PRIVATE_SHARE_URL"})}));
