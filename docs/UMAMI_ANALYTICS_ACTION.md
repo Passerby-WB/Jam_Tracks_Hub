@@ -1,4 +1,11 @@
-# Umami Analytics GitHub Action
+# Umami Analytics GitHub Actions
+
+The daily README snapshot and weekly API report are independent. The daily
+snapshot uses an Umami Share dashboard, not the paid API. The weekly report
+credentials were absent at the September 2026 audit; a successful credential-skip
+is not evidence that weekly reporting works. Weekly implementation is unchanged.
+
+## Weekly API report (separate, optional)
 
 This workflow creates a weekly GitHub issue with a simple Jam Tracks Hub performance report from Umami.
 
@@ -121,48 +128,143 @@ analytics-report-title.txt
 
 These files are generated output and should not be committed.
 
-## README Screenshot Without API Access
+## Daily README snapshot: protected PR and native auto-merge
 
-The repository also includes a free-plan friendly workflow:
+Workflow: `.github/workflows/umami-readme-screenshot.yml`.
+Schedule: `15 22 * * *` UTC (06:15 Asia/Taipei; GitHub can delay scheduled runs).
+History dates and README timestamps use Asia/Taipei.
 
-```text
-.github/workflows/umami-readme-screenshot.yml
-```
-
-It opens the public Umami Share URL once per day, captures a screenshot, saves it to:
-
-```text
-assets/analytics/umami-dashboard.png
-```
-
-It also keeps dated history snapshots in:
+The old direct-main push failed with GH013 after main protection was enabled.
+Protection remains intact; the writer now uses this lifecycle:
 
 ```text
-assets/analytics/history/YYYY-MM-DD.png
+schedule -> validated chart -> machine branch -> App-authored PR
+         -> static-checks + Workers Builds: jamtrackshub
+         -> GitHub native auto-SQUASH -> main -> normal Cloudflare deployment
+         -> delete only the confirmed merged machine branch
 ```
 
-Then it updates:
+### Narrow autonomous-merge exception
 
-```text
-README.md
+Normal feature, fix, refactor, release, migration and maintenance PRs still require
+explicit user merge approval. The one-time implementation PR must have auto-merge
+OFF. Only validated daily snapshot PRs from `jam-tracks-hub-umami-snapshot-bot[bot]`
+may enroll in native SQUASH auto-merge without daily user intervention.
+
+The writer validates the exact repository, main base, machine branch namespace,
+App PR author, signed App-only commits, generating workflow/run provenance,
+mergeability, file paths, file modes and README subrange. Enrollment is bound to
+the validated head SHA. Required checks are matched by name, head SHA and producer
+(GitHub Actions / Cloudflare). GitHub enforces main rules while checks run; the
+writer rejects failed, cancelled, timed-out, skipped or neutral check results.
+It never invokes direct merge, administrator merge or a bypass fallback.
+
+Main's PR requirement, conversation resolution, linear history, squash policy,
+two required checks, force-push/deletion restrictions and empty bypass list stay
+unchanged. Repository **Allow auto-merge** must be ON; it does not automatically
+enroll normal PRs. **Allow GitHub Actions to create and approve pull requests**
+stays OFF. The App, not `GITHUB_TOKEN`, performs PR writes so normal required
+workflows can start without intermediate user workflow approval.
+
+### Setup and credential boundaries
+
+Create the private GitHub App `jam-tracks-hub-umami-snapshot-bot`, owned by the
+repository owner, and install it on **Jasper-hsury/Jam_Tracks_Hub only**:
+
+- Metadata: read (implicit).
+- Contents: read/write.
+- Pull requests: read/write.
+- No other permission, event webhook, ruleset bypass or unrelated installation.
+
+In repository Settings → Secrets and variables → Actions, provision secrets
+`UMAMI_SNAPSHOT_APP_ID` and `UMAMI_SNAPSHOT_APP_PRIVATE_KEY`. Never print their
+values. Any temporary private-key file must be outside the repository and deleted
+after provisioning. The pinned token action creates a repository-only, short-lived
+installation token and revokes it at job completion. `GITHUB_TOKEN` has read-only
+contents, PR, checks and Actions permissions for verification.
+
+Keep `UMAMI_SHARE_URL` as a repository secret or the existing variable. Obtain it
+from Umami → Websites → jamtrackshub.com → Edit → Share URL. Never put its full
+value in code, README, commit, PR, log, filename or image metadata. Errors print
+bounded state/error codes, not dashboard text, URLs or API response bodies.
+
+### Snapshot content and last-known-good safety
+
+Only these generated outputs are permitted:
+
+- `README.md`: strictly inside `UMAMI_ANALYTICS_START` / `UMAMI_ANALYTICS_END`,
+  with canonical static markup and a formatted timestamp. Outside bytes must match.
+- `assets/analytics/umami-dashboard.png`.
+- `assets/analytics/history/YYYY-MM-DD.png` with a real calendar date.
+
+PNG validation checks signature, chunk CRC, bounded decompression, scanline filters,
+8-bit RGB/RGBA decoding, 600–2000 px width, 250–1000 px height and a 2 MiB maximum.
+These bounds derive from the existing 1278 × 521 / 13,254-byte chart plus margin.
+Text/EXIF/arbitrary metadata, trailing data, symlinks, renames and deletions are
+rejected. It captures only the traffic chart, not a full dashboard/session replay.
+No Song Workspace data or new analytics events are introduced.
+
+`UPDATED`, `UNCHANGED`, `INVALID_DASHBOARD`, `FETCH_FAILURE`, `SCREENSHOT_FAILURE`
+and `VALIDATION_FAILURE` are distinct. Failed validation exits nonzero before any
+snapshot write: latest image, history and timestamp remain last-known-good.
+Unchanged decoded pixels create no timestamp-only commit, branch, PR or merge.
+Validated files are published together in a Git tree/commit; the writer never
+stages the workflow checkout or local artifacts.
+
+### PR lifecycle and safe stops
+
+Branches use `automation/umami-readme-snapshot-YYYY-MM-DD`. One fixed concurrency
+group, with cancellation disabled, serializes writers. At most one machine PR may
+be open; the next valid changed snapshot updates that same branch with a normal
+fast-forward commit and new CI. It never force-pushes or resets a branch.
+
+Fresh main is checked before writes. Conflicts, unexpected authors/files, unknown
+mergeability, changed head, failed checks or ambiguous inventories safely stop.
+Existing auto-merge is disabled before updating an open PR; a failed generation or
+unchanged retry does not merge that PR. A valid changed retry re-enrolls it. A
+human-closed, unmerged snapshot is not recreated with identical pixels; a later
+materially new daily snapshot may start a new dated cycle. A closed same-day cycle
+is not reopened. The validator bounds an open cycle to 30 commits / 34 changed
+files; excessive stale cycles require investigation, not relaxed validation.
+
+CI failure leaves the PR open and main unchanged. The writer waits up to roughly
+40 minutes for native merge (job timeout 55 minutes). Timeout is a failure, not
+proof of merge; native enrollment may remain pending under GitHub rules. A later
+run checks old merged PRs for safe branch cleanup. Only a machine branch whose
+tip still matches its confirmed merged PR can be deleted. Missing already-cleaned
+branches are harmless; human branches and main are never cleanup targets.
+
+### Validation and non-merging dry run
+
+Use locked `npm ci`, Node 22.23.2 and Playwright 1.63.0; browser installation uses
+`npx --no-install playwright install --with-deps chromium`. Dependencies and action
+revisions are pinned. Tests never contact live Umami:
+
+```bash
+node --test tests/umami-snapshot*.test.js
+npm test
+npm run check
+npm run build:cloudflare
+npm run verify:cloudflare
+git diff --check
 ```
 
-This does not require an Umami API key.
+Manual workflow dispatch defaults `dry_run` to true. Before implementation merge,
+only `fix/umami-readme-automerge-v1` may run the workflow off main, and only in dry
+mode. The dry PR starts from main, not the implementation branch. It uses the real
+App/chart, validates the exact diff and waits for both required checks to succeed,
+then closes without merging and deletes only its test branch. It never enables
+auto-merge. A no-diff result is not proof of PR/check startup. Production/main must
+stay unchanged throughout this dry test. After user-authorized implementation
+merge, scheduled main runs use production mode; explicit main dispatch with
+`dry_run=false` has the same narrowly authorized production behavior.
 
-Required setup:
+### Rollback
 
-```text
-Settings -> Secrets and variables -> Actions
-```
-
-Add either a repository secret or variable:
-
-```text
-UMAMI_SHARE_URL
-```
-
-Use the public share link from:
-
-```text
-Umami -> Websites -> jamtrackshub.com -> Edit -> Share URL
-```
+Disable only the daily README workflow in Actions, then disable native auto-merge
+on any still-open machine PR (disabling a workflow alone does not cancel GitHub's
+pending enrollment). If retiring the integration, revoke its repository-only App
+installation and remove its two secrets. Preserve existing screenshots/history and
+main protection. Any code rollback follows a normal user-approved PR; do not
+restore direct-main pushes. No product version, tag or release is changed by this
+automation reliability fix.
