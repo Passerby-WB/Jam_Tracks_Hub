@@ -1,94 +1,7 @@
 const fs = require("fs");
 const path = require("path");
 
-const SHARE_URL = process.env.UMAMI_SHARE_URL;
-const README_PATH = process.env.README_PATH || "README.md";
-const IMAGE_PATH = process.env.ANALYTICS_IMAGE_PATH || "assets/analytics/umami-dashboard.png";
-const IMAGE_MARKDOWN_PATH = process.env.ANALYTICS_IMAGE_MARKDOWN_PATH || "assets/analytics/umami-dashboard.png";
-const HISTORY_DIR = process.env.ANALYTICS_HISTORY_DIR || "assets/analytics/history";
-const UPDATED_AT = process.env.ANALYTICS_UPDATED_AT || new Date().toISOString();
-
-const START_MARKER = "<!-- UMAMI_ANALYTICS_START -->";
-const END_MARKER = "<!-- UMAMI_ANALYTICS_END -->";
-
-class ScreenshotValidationError extends Error {
-  constructor(message) {
-    super(message);
-    this.name = "ScreenshotValidationError";
-  }
-}
-
-function ensureDir(filePath) {
-  fs.mkdirSync(path.dirname(filePath), { recursive: true });
-}
-
-function formatUpdatedAt(value) {
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) {
-    return value;
-  }
-
-  return new Intl.DateTimeFormat("en-US", {
-    dateStyle: "medium",
-    timeStyle: "short",
-    timeZone: process.env.REPORT_TIMEZONE || "Asia/Taipei"
-  }).format(date);
-}
-
-function formatHistoryDate(value) {
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) {
-    return value.replace(/[^a-z0-9-]/gi, "-").toLowerCase();
-  }
-
-  return new Intl.DateTimeFormat("en-CA", {
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    timeZone: process.env.REPORT_TIMEZONE || "Asia/Taipei"
-  }).format(date);
-}
-
-function buildReadmeBlock({ screenshotAvailable }) {
-  const imageSection = screenshotAvailable
-    ? `<p align="center">
-  <img src="${IMAGE_MARKDOWN_PATH}" alt="Umami analytics dashboard" width="100%" />
-</p>`
-    : "_Analytics screenshot will appear here after `UMAMI_SHARE_URL` is configured and the workflow runs._";
-
-  return `${START_MARKER}
-## Website Analytics
-
-Daily Umami analytics snapshot for Jam Tracks Hub.
-
-Last updated: ${formatUpdatedAt(UPDATED_AT)}
-
-${imageSection}
-${END_MARKER}`;
-}
-
-function updateReadme({ screenshotAvailable }) {
-  if (!fs.existsSync(README_PATH)) {
-    throw new Error(`README file not found: ${README_PATH}`);
-  }
-
-  const readme = fs.readFileSync(README_PATH, "utf8");
-  const block = buildReadmeBlock({ screenshotAvailable });
-
-  if (readme.includes(START_MARKER) && readme.includes(END_MARKER)) {
-    const pattern = new RegExp(`${START_MARKER}[\\s\\S]*?${END_MARKER}`);
-    fs.writeFileSync(README_PATH, `${readme.replace(pattern, block).trim()}\n`);
-    return;
-  }
-
-  const insertAfter = "\n## Tool Preview";
-  if (readme.includes(insertAfter)) {
-    fs.writeFileSync(README_PATH, readme.replace(insertAfter, `\n${block}\n${insertAfter}`));
-    return;
-  }
-
-  fs.writeFileSync(README_PATH, `${readme.trim()}\n\n${block}\n`);
-}
+const { SnapshotError, IMAGE, decodePng, buildSnapshot, safeFailure } = require("./umami-snapshot-contract");
 
 async function findTrafficChartElement(page) {
   const handle = await page.evaluateHandle(() => {
@@ -186,12 +99,7 @@ async function findDashboardIssue(page) {
 
     const matchedError = errorPatterns.find((pattern) => pattern.test(visibleText));
     if (matchedError) {
-      return visibleText
-        .split("\n")
-        .map((line) => line.trim())
-        .filter(Boolean)
-        .slice(0, 8)
-        .join(" | ");
+      return "INVALID_DASHBOARD";
     }
 
     if (!/Visitors/i.test(visibleText) || !/Views/i.test(visibleText)) {
@@ -202,29 +110,27 @@ async function findDashboardIssue(page) {
   });
 }
 
-async function captureScreenshot() {
-  if (!SHARE_URL) {
-    console.log("UMAMI_SHARE_URL is not configured. README analytics block will show setup guidance.");
-    updateReadme({ screenshotAvailable: fs.existsSync(IMAGE_PATH) });
-    return;
-  }
-
-  const { chromium } = require("playwright");
-  ensureDir(IMAGE_PATH);
-
-  const browser = await chromium.launch();
+async function captureScreenshot(shareUrl, chromium = require("playwright").chromium) {
+  try {
+    const url = new URL(shareUrl);
+    if (url.protocol !== "https:" || url.hostname !== "cloud.umami.is" || url.username || url.password || !url.pathname.startsWith("/share/")) throw new Error();
+  } catch { throw new SnapshotError("FETCH_FAILURE"); }
+  let browser;
+  try { browser = await chromium.launch(); } catch { throw new SnapshotError("SCREENSHOT_FAILURE"); }
   try {
     const page = await browser.newPage({
       viewport: { width: 1600, height: 1200 },
       deviceScaleFactor: 1
     });
 
-    await page.goto(SHARE_URL, { waitUntil: "networkidle", timeout: 60000 });
+    try {
+      const response = await page.goto(shareUrl, { waitUntil: "networkidle", timeout: 60000 });
+      if (!response?.ok() || new URL(page.url()).origin !== "https://cloud.umami.is") throw new Error();
+    } catch { throw new SnapshotError("FETCH_FAILURE"); }
     await page.waitForTimeout(5000);
 
     await page.evaluate(() => {
       const removableSelectors = [
-        "button:has-text('Close')",
         "[aria-label*='cookie' i]",
         "[class*='cookie' i]",
         "[class*='banner' i]"
@@ -239,36 +145,41 @@ async function captureScreenshot() {
 
     const dashboardIssue = await findDashboardIssue(page);
     if (dashboardIssue) {
-      throw new ScreenshotValidationError(`Umami dashboard did not render a valid traffic chart. ${dashboardIssue}`);
+      throw new SnapshotError("INVALID_DASHBOARD");
     }
 
     const chartElement = await findTrafficChartElement(page);
     if (!chartElement) {
-      throw new ScreenshotValidationError("Could not find a valid Umami traffic chart element. Existing README screenshot was preserved.");
+      throw new SnapshotError("INVALID_DASHBOARD");
     }
 
-    await chartElement.screenshot({ path: IMAGE_PATH });
-    await chartElement.dispose();
-
-    const historyPath = path.join(HISTORY_DIR, `${formatHistoryDate(UPDATED_AT)}.png`);
-    ensureDir(historyPath);
-    fs.copyFileSync(IMAGE_PATH, historyPath);
-
-    updateReadme({ screenshotAvailable: true });
-    console.log(`Saved Umami screenshot to ${IMAGE_PATH}`);
-    console.log(`Saved Umami history screenshot to ${historyPath}`);
+    let image;
+    try { image = await chartElement.screenshot({ type: "png", animations: "disabled" }); }
+    catch { throw new SnapshotError("SCREENSHOT_FAILURE"); }
+    finally { await chartElement.dispose(); }
+    decodePng(image);
+    return image;
   } finally {
     await browser.close();
   }
 }
 
-captureScreenshot().catch((error) => {
-  if (error instanceof ScreenshotValidationError) {
-    console.warn(error.message);
-    console.warn("Skipped README analytics update so the previous valid screenshot remains in place.");
-    return;
+// Capture and validate completely before touching any last-known-good output.
+// The remote writer consumes this in-memory result and publishes one Git tree.
+async function generateSnapshot({ readme, previousImage, shareUrl, now = new Date().toISOString(), capture = captureScreenshot }) {
+  const image = await capture(shareUrl);
+  return buildSnapshot({ readme, previousImage, image, now });
+}
+async function main() {
+  const root = process.cwd();
+  const result = await generateSnapshot({ readme: fs.readFileSync(path.join(root, "README.md"), "utf8"), previousImage: fs.readFileSync(path.join(root, IMAGE)), shareUrl: process.env.UMAMI_SHARE_URL });
+  // CLI is for local generation only. Workflow publication is handled separately.
+  for (const file of result.files) {
+    const target = path.join(root, file.path);
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.writeFileSync(target, file.bytes);
   }
-
-  console.error(error);
-  process.exit(1);
-});
+  console.log(result.state);
+}
+if (require.main === module) main().catch(error => { console.error(safeFailure(error)); process.exitCode = 1; });
+module.exports = { captureScreenshot, generateSnapshot, findDashboardIssue, findTrafficChartElement };

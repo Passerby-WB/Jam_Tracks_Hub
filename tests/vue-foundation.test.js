@@ -16,6 +16,7 @@ test("pins the minimal private Vue and Vite foundation", () => {
   assert.deepEqual(packageJson.dependencies, { vue: "3.5.42" });
   assert.deepEqual(packageJson.devDependencies, {
     "@vitejs/plugin-vue": "6.0.8",
+    playwright: "1.63.0",
     vite: "8.2.2"
   });
 
