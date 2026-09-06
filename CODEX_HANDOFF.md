@@ -259,6 +259,14 @@ Skill instructions are subordinate to the user's current request and current rep
 - Preserve public URLs, metadata, API contracts, local storage schemas, music-domain behavior, accessibility, i18n, theme prepaint, Umami pageviews, and Cloudflare routing unless the task explicitly changes one.
 - Keep mutable provider state and long-lived architecture contracts clearly separated.
 
+### Licensing — Contract / Policy
+
+- Original source code and software components are licensed under the MIT License in `LICENSE`, except where otherwise noted.
+- Repository-level MIT detection does not mean every tracked asset is MIT licensed. Consult `LICENSE-CONTENT.md` before editing, distributing, or reusing content assets.
+- Unless separately licensed, original audio and backing tracks, ZIP/PDF music resources, images and artwork, and actual Jam Tracks Hub branding assets remain all rights reserved. Ordinary HTML, Vue components, CSS layout, and UI interaction logic are software, not brand assets merely because they appear visually on the site.
+- Third-party materials remain subject to their respective licenses and copyright terms; preserve their notices and do not relicense them.
+- The MIT License grants no trademark or brand-use rights in the Jam Tracks Hub name, logos, wordmarks, or other branding.
+
 ### Known regressions / hidden gotchas
 
 - Homepage hero animation uses GSAP SplitText after Vue locale rendering and font readiness. Replacing a translated parent node's text after SplitText owns its descendants can destroy animation DOM. Preserve the lifecycle/revert/rebuild sequence.
