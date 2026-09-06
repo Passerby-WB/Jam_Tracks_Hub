@@ -186,10 +186,66 @@ after provisioning. The pinned token action creates a repository-only, short-liv
 installation token and revokes it at job completion. `GITHUB_TOKEN` has read-only
 contents, PR, checks and Actions permissions for verification.
 
-Keep `UMAMI_SHARE_URL` as a repository secret or the existing variable. Obtain it
-from Umami → Websites → jamtrackshub.com → Edit → Share URL. Never put its full
-value in code, README, commit, PR, log, filename or image metadata. Errors print
-bounded state/error codes, not dashboard text, URLs or API response bodies.
+Keep `UMAMI_SHARE_URL` only as a repository secret. A repository variable or any
+other plaintext fallback is prohibited. Obtain the capability from the website's
+Share settings in Umami and enter it directly in GitHub's repository-secret UI.
+Never put its full value in code, README, commit, PR, log, filename or image
+metadata. The workflow fails before dashboard, branch or PR activity when the
+secret is unavailable. GitHub's native secret masking protects step environment
+rendering, and the first secret-aware step also registers an explicit job-wide
+mask before the screenshot automation can run. Errors print bounded state/error
+codes, not dashboard text, URLs, path components or API response bodies.
+
+### September 2026 Share capability incident
+
+An Umami dashboard Share capability was exposed in GitHub Actions logs because
+the daily workflow allowed a repository-variable fallback. The fallback value
+was injected into the runner environment and was not eligible for GitHub's
+native secret masking. The affected capability was invalidated, a replacement
+was stored only as the `UMAMI_SHARE_URL` repository secret, and the repository
+variable was removed.
+
+All 48 confirmed affected GitHub-hosted log sets were deleted while their 48 run
+records, timestamps, commit provenance, PRs and deployments were preserved. This
+means the known GitHub log surfaces were removed; it does not assert that no one
+observed the historical value or that every external copy on the internet was
+erased. The daily workflow remains manually disabled until this remediation is
+merged and qualified. The GitHub App credentials, permissions, repository-only
+installation and empty ruleset bypass list were not changed.
+
+The logging contract is fail-closed: use the repository secret only, inject it
+only into the mask-registration and screenshot-publication steps, register the
+canonical `add-mask` command before capture, never dump the environment, and
+reduce unknown errors to content-free state codes. The full URL, private path,
+derived identifier and token are forbidden from stdout, stderr, job outputs,
+artifacts, README content, PNG metadata, branch names, commit messages and PR
+content. Synthetic `.invalid` capabilities cover those channels in tests; tests
+never use the real Share capability.
+
+### Post-merge qualification and re-enable
+
+Do not run the replacement capability from an unmerged security-fix branch. After
+the user approves and merges the remediation through the protected main branch:
+
+1. Wait for main `static-checks` and the normal `Workers Builds: jamtrackshub`
+   deployment to pass; do not bypass protection or deploy manually.
+2. Reconfirm that `UMAMI_SHARE_URL` exists under repository **Secrets**, that no
+   same-named repository **Variable** exists, and that the daily workflow source
+   on main contains no variable fallback.
+3. Re-enable only **Umami README Screenshot** in GitHub Actions.
+4. Run one controlled main `workflow_dispatch` with `dry_run=true`. Inspect the
+   resulting log rendering only for the expected masked credential and bounded
+   status codes; never copy the secret out of GitHub.
+5. Confirm that the dry-run path creates no merge and does not change production.
+   If content differs, its App-authored test PR must pass both required checks,
+   close unmerged and delete only its verified dry-run branch.
+6. Leave the workflow enabled for its normal schedule only after the controlled
+   run passes. On any raw or derived capability exposure, disable it immediately,
+   invalidate that capability and restart incident response.
+
+The autonomous production lifecycle remains App PR → required CI → native
+auto-squash → main → normal Cloudflare production deployment. The weekly Umami
+API report is a separate follow-up and is not changed by this remediation.
 
 ### Snapshot content and last-known-good safety
 
