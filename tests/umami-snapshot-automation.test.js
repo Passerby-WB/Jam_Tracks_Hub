@@ -8,7 +8,7 @@ const image=fs.readFileSync(c.IMAGE);
 const env={GITHUB_REPOSITORY:a.REPO,UMAMI_APP_SLUG:a.APP,GITHUB_WORKFLOW_REF:`${a.REPO}/${a.WORKFLOW}@refs/heads/main`,GITHUB_REF:"refs/heads/main",GITHUB_EVENT_NAME:"schedule",UMAMI_DRY_RUN:"false",GITHUB_RUN_ID:"123",GITHUB_SHA:SOURCE};
 const before=`outside\n${c.readmeBlock("2026-09-03")}\nend`;
 const after=`outside\n${c.readmeBlock("2026-09-06")}\nend`;
-function pr(dryRun=false){return {number:41,node_id:"PR_test",title:"chore: refresh Umami analytics snapshot",state:"open",draft:false,mergeable:true,merged:false,changed_files:3,body:a.prBody("2026-09-06",dryRun),user:{login:a.BOT,type:"Bot"},base:{ref:"main",repo:{full_name:a.REPO}},head:{ref:`${a.BRANCH_PREFIX}2026-09-06`,sha:SHA,repo:{full_name:a.REPO}},auto_merge:null};}
+function pr(dryRun=false){return {number:41,node_id:"PR_test",title:"chore: refresh Umami analytics snapshot",state:"open",draft:false,mergeable:true,merged:false,changed_files:3,body:a.prBody("2026-09-06",dryRun),user:{login:a.BOT,type:"Bot"},base:{ref:"main",repo:{full_name:a.REPO}},head:{ref:`${a.cyclePrefix(dryRun)}2026-09-06`,sha:SHA,repo:{full_name:a.REPO}},auto_merge:null};}
 function runs(status="completed",conclusion="success"){return a.CHECKS.map((r,i)=>({id:i+1,name:r.name,app:{id:r.app},head_sha:SHA,status,conclusion}));}
 function fixture({dryRun=false,checkRuns=runs(),merged=false}={}){
   const record=pr(dryRun),writes=[],mutations=[];
@@ -123,8 +123,8 @@ function oldImage(){
   const header=Buffer.alloc(13);header.writeUInt32BE(600);header.writeUInt32BE(250,4);header[8]=8;header[9]=2;
   return Buffer.concat([image.subarray(0,8),chunk("IHDR",header),chunk("IDAT",deflateSync(Buffer.alloc(1801*250))),chunk("IEND",Buffer.alloc(0))]);
 }
-function lifecycle({existing=false,closed=[],drift=false}={}){
-  const api=fixture({dryRun:true}),read=api.read,pages=api.pages,write=api.write;
+function lifecycle({existing=false,closed=[],drift=false,dryRun=true,otherOpen=[]}={}){
+  const api=fixture({dryRun}),read=api.read,pages=api.pages,write=api.write;
   let mainReads=0,published=false;
   api.read=async path=>{
     if(path==="git/ref/heads/main")return {object:{sha:drift&&++mainReads>1?SOURCE:BASE}};
@@ -132,7 +132,7 @@ function lifecycle({existing=false,closed=[],drift=false}={}){
     return read(path);
   };
   api.pages=async path=>{
-    if(path.startsWith("pulls?state=open"))return existing?[api.record]:[];
+    if(path.startsWith("pulls?state=open"))return [...(existing?[api.record]:[]),...otherOpen];
     if(path.startsWith("pulls?state=closed"))return closed;
     return pages(path);
   };
@@ -170,6 +170,84 @@ test("human-closed production snapshot with identical pixels is not recreated",a
 test("closed same-date dry-run is not reopened or duplicated",async()=>{
   const old={...pr(true),state:"closed",merged_at:null};const api=lifecycle({closed:[old]});
   assert.equal((await a.runAutomation({env:{...env,UMAMI_DRY_RUN:"true"},api,capture:async()=>image,now:"2026-09-06"})).state,"CYCLE_ALREADY_CLOSED");assert.equal(api.writes.length,0);
+});
+async function runMockProduction(api, now="2026-09-06") {
+  return a.runAutomation({env,api,capture:async()=>image,now,wait:async()=>{
+    // Simulate GitHub completing native merge, never contact a remote service.
+    api.record.state="closed";api.record.merged=true;
+  }});
+}
+test("closed dry-run today cannot suppress production UPDATED today, including historical PR 39 format",async()=>{
+  for(const legacy of [false,true]) {
+    const old={...pr(true),state:"closed",merged_at:null};
+    if(legacy)old.head.ref=`${a.BRANCH_PREFIX}2026-09-06`;
+    const api=lifecycle({closed:[old],dryRun:false});
+    assert.equal((await runMockProduction(api)).state,"MERGED");
+    const ref=api.writes.find(w=>w.path==="git/refs");
+    assert.equal(ref.body.ref,`refs/heads/${a.cyclePrefix(false)}2026-09-06`);
+    assert.notEqual(ref.body.ref,`refs/heads/${old.head.ref}`);
+    assert.equal(api.writes.filter(w=>w.path==="pulls").length,1);
+  }
+});
+test("production closed unmerged identical snapshot remains suppressed in current and legacy formats",async()=>{
+  for(const legacy of [false,true]) {
+    const old={...pr(),state:"closed",merged_at:null};
+    if(legacy)old.head.ref=`${a.BRANCH_PREFIX}2026-09-06`;
+    const api=lifecycle({closed:[old],dryRun:false});
+    assert.equal((await runMockProduction(api)).state,"REJECTED_SNAPSHOT_UNCHANGED");
+    assert.equal(api.writes.length,0);assert.equal(api.mutations.length,0);
+  }
+});
+test("same production date stays closed even with changed pixels, but later new date may proceed",async()=>{
+  for(const legacy of [false,true])for(const later of [false,true]) {
+    const old={...pr(),state:"closed",merged_at:null};old.head.sha=SOURCE;
+    if(legacy)old.head.ref=`${a.BRANCH_PREFIX}2026-09-06`;
+    const api=lifecycle({closed:[old],dryRun:false}),blob=api.blob;
+    api.blob=async(sha,path)=>sha===SOURCE&&path===c.IMAGE?oldImage():blob(sha,path);
+    const result=await runMockProduction(api,later?"2026-09-07":"2026-09-06");
+    assert.equal(result.state,later?"MERGED":"CYCLE_ALREADY_CLOSED");
+    if(!later)assert.equal(api.writes.length,0);
+  }
+});
+test("open dry-run does not suppress or become production PR, and production is not reused by dry-run",async()=>{
+  for(const dryRun of [false,true]) {
+    const other=pr(!dryRun);other.number=99;
+    const api=lifecycle({dryRun,otherOpen:[other]});
+    const result=dryRun?await a.runAutomation({env:{...env,UMAMI_DRY_RUN:"true"},api,capture:async()=>image,now:"2026-09-06",wait:async()=>{}}):await runMockProduction(api);
+    assert.equal(result.state,dryRun?"DRY_RUN_PASS":"MERGED");
+    assert.equal(api.writes.find(w=>w.path==="git/refs").body.ref,`refs/heads/${a.cyclePrefix(dryRun)}2026-09-06`);
+    assert.ok(api.writes.every(w=>!w.path.includes(other.head.ref)&&w.path!=="pulls/99"));
+    assert.ok(api.mutations.every(m=>m.input.pullRequestId===api.record.node_id));
+  }
+});
+test("closed opposite-mode state is not read for suppression or branch cleanup",async()=>{
+  for(const dryRun of [false,true]) {
+    const other={...pr(!dryRun),state:"closed",merged_at:"2026-09-06T00:00:00Z"};other.head.sha=SOURCE;
+    const api=lifecycle({dryRun,closed:[other]}),blob=api.blob,read=api.read;
+    api.blob=async(sha,path)=>{assert.notEqual(sha,SOURCE);return blob(sha,path);};
+    api.read=async path=>{assert.ok(!path.includes(other.head.ref));return read(path);};
+    if(dryRun)await a.runAutomation({env:{...env,UMAMI_DRY_RUN:"true"},api,capture:async()=>image,now:"2026-09-06",wait:async()=>{}});
+    else assert.equal((await runMockProduction(api)).state,"MERGED");
+  }
+});
+test("existing production PR is reused despite dry-run state; duplicate production PRs stop before writes",async()=>{
+  const api=lifecycle({existing:true,dryRun:false,otherOpen:[pr(true)]});
+  assert.equal((await runMockProduction(api)).state,"MERGED");
+  assert.equal(api.writes.filter(w=>w.path==="pulls"||w.path==="git/refs").length,0);
+  assert.equal(api.writes.find(w=>w.method==="PATCH"&&w.path.startsWith("git/refs/")).body.force,false);
+  const duplicate=lifecycle({existing:true,dryRun:false,otherOpen:[pr(),pr(true)]});
+  await assert.rejects(runMockProduction(duplicate));assert.equal(duplicate.writes.length,0);assert.equal(duplicate.mutations.length,0);
+});
+test("mode/body mismatch, cross-mode cleanup, and legacy branch reuse are rejected",async()=>{
+  for(const dryRun of [false,true]) {
+    const wrong=pr(!dryRun);wrong.body=a.prBody("2026-09-06",dryRun);
+    assert.throws(()=>a.identify(wrong,{dryRun}));
+    const legacy=pr(dryRun);legacy.head.ref=`${a.BRANCH_PREFIX}2026-09-06`;
+    assert.throws(()=>a.identify(legacy,{dryRun}));
+    const api=fixture({dryRun});
+    await assert.rejects(a.cleanup(api,{...pr(!dryRun),state:"closed",merged:!dryRun},SHA,dryRun));
+    assert.equal(api.writes.length,0);
+  }
 });
 test("CI failure after enrollment disables auto-merge and preserves open PR",async()=>{
   const api=fixture({checkRuns:runs("in_progress",null)}),read=api.read;

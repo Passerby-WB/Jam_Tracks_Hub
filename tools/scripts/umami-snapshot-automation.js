@@ -14,8 +14,19 @@ const TITLE = "chore: refresh Umami analytics snapshot";
 const MARKER = "<!-- jth-umami-snapshot:v1 -->";
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
-function machineBranch(branch) {
+function legacyBranch(branch) {
   return typeof branch === "string" && branch.startsWith(BRANCH_PREFIX) && validDate(branch.slice(BRANCH_PREFIX.length));
+}
+function cyclePrefix(dryRun) { return `${BRANCH_PREFIX}${dryRun ? "dry-run" : "production"}-`; }
+function machineBranch(branch, dryRun=false) {
+  const prefix=cyclePrefix(dryRun);
+  return typeof branch === "string" && branch.startsWith(prefix) && validDate(branch.slice(prefix.length));
+}
+function modeRecords(prs, dryRun) {
+  // Legacy closed PRs used a shared namespace. Their explicit mode is needed
+  // only for historical cycle policy, never to reuse a legacy branch.
+  return prs.filter(pr=>pr.head?.ref?.startsWith(cyclePrefix(dryRun)) ||
+    (legacyBranch(pr.head?.ref) && pr.body?.startsWith(`${MARKER}\nMode: ${dryRun ? "dry-run" : "production"}\n`)));
 }
 function assertExecution(env) {
   requireValid(env.GITHUB_REPOSITORY === REPO && env.UMAMI_APP_SLUG === APP);
@@ -25,14 +36,14 @@ function assertExecution(env) {
   requireValid(env.GITHUB_REF === "refs/heads/main" || (env.UMAMI_DRY_RUN === "true" && env.GITHUB_EVENT_NAME === "workflow_dispatch" && env.GITHUB_REF === FIX_REF));
   requireValid(/^\d+$/.test(env.GITHUB_RUN_ID) && /^[a-f0-9]{40}$/.test(env.GITHUB_SHA));
 }
-function identify(pr, {dryRun=false}={}) {
+function identify(pr, {dryRun=false,allowLegacy=false}={}) {
   requireValid(pr.base?.ref === "main" && pr.base.repo?.full_name === REPO && pr.head.repo?.full_name === REPO);
-  requireValid(pr.user?.login === BOT && pr.user?.type === "Bot" && machineBranch(pr.head.ref));
+  requireValid(pr.user?.login === BOT && pr.user?.type === "Bot" && (machineBranch(pr.head.ref,dryRun) || (allowLegacy && pr.state==="closed" && legacyBranch(pr.head.ref))));
   requireValid(pr.title === TITLE && !pr.draft && pr.body?.startsWith(`${MARKER}\nMode: ${dryRun ? "dry-run" : "production"}\n`));
   requireValid(pr.body.includes(`Workflow: ${WORKFLOW}\n`));
 }
 function selectOpen(prs, dryRun) {
-  const matches = prs.filter(pr => pr.state === "open" && pr.head?.ref?.startsWith(BRANCH_PREFIX));
+  const matches = modeRecords(prs,dryRun).filter(pr => pr.state === "open");
   requireValid(matches.length <= 1);
   if (matches.length) identify(matches[0], {dryRun});
   return matches[0];
@@ -130,7 +141,7 @@ async function cleanup(api, pr, expectedSha, dryRun=false) {
   identify(pr,{dryRun});
   requireValid(pr.head.sha===expectedSha && pr.state==="closed" && (dryRun ? !pr.merged : pr.merged===true));
   const ref=await api.read(`git/ref/heads/${pr.head.ref}`);
-  requireValid(ref.object.sha===expectedSha && machineBranch(pr.head.ref));
+  requireValid(ref.object.sha===expectedSha && machineBranch(pr.head.ref,dryRun));
   await api.write("DELETE",`git/refs/heads/${pr.head.ref}`);
 }
 async function finishPR(api, number, sha, dryRun, wait=sleep) {
@@ -195,18 +206,20 @@ async function runAutomation({env=process.env, api, capture=captureScreenshot, w
     if(dryRun && pr)return {state:await finishPR(api,pr.number,base,true,wait),pr:pr.number};
     return {state:"UNCHANGED"};
   }
-  const closed=await api.pages("pulls?state=closed&base=main&sort=updated&direction=desc");
-  for(const old of closed.filter(p=>p.head?.ref?.startsWith(BRANCH_PREFIX))) {
-    identify(old,{dryRun:old.body?.includes("Mode: dry-run\n")});
+  const closed=modeRecords(await api.pages("pulls?state=closed&base=main&sort=updated&direction=desc"),dryRun);
+  for(const old of closed) {
+    identify(old,{dryRun,allowLegacy:true});
     if(old.merged_at) {
+      requireValid(!dryRun);
+      if(legacyBranch(old.head.ref))continue;
       try { await cleanup(api,{...old,merged:true},old.head.sha,false); }
       catch(error) { if(error.message!=="GITHUB_404")throw error; }
-    } else if(!old.body.includes("Mode: dry-run\n") && decodePng(await api.blob(old.head.sha,IMAGE)).digest===decodePng(image).digest) {
+    } else if(!dryRun && decodePng(await api.blob(old.head.sha,IMAGE)).digest===decodePng(image).digest) {
       return {state:"REJECTED_SNAPSHOT_UNCHANGED"};
     }
   }
-  const branch=pr?.head.ref || `${BRANCH_PREFIX}${day}`;
-  if(!pr && closed.some(p=>p.head?.ref===branch))return {state:"CYCLE_ALREADY_CLOSED"};
+  const branch=pr?.head.ref || `${cyclePrefix(dryRun)}${day}`;
+  if(!pr && closed.some(p=>p.head.ref.endsWith(day)))return {state:"CYCLE_ALREADY_CLOSED"};
   const freshMain=await api.read("git/ref/heads/main");
   if(!pr)requireValid(freshMain.object.sha===main.object.sha);
   if(pr) {
@@ -222,7 +235,7 @@ async function runAutomation({env=process.env, api, capture=captureScreenshot, w
   const tree=await api.write("POST","git/trees",{base_tree:parent.tree.sha,tree:treeEntries});
   // Let GitHub attribute and sign the commit as the authenticated App.
   const commit=await api.write("POST","git/commits",{message:`${TITLE}\n\nUmami-Run: ${env.GITHUB_RUN_ID}\nUmami-Source: ${env.GITHUB_SHA}\nUmami-Mode: ${dryRun?"dry-run":"production"}\n`,tree:tree.sha,parents:[base]});
-  requireValid(machineBranch(branch));
+  requireValid(machineBranch(branch,dryRun));
   if(pr)await api.write("PATCH",`git/refs/heads/${branch}`,{sha:commit.sha,force:false});
   else await api.write("POST","git/refs",{ref:`refs/heads/${branch}`,sha:commit.sha});
   if(pr) await api.write("PATCH",`pulls/${pr.number}`,{title:TITLE,body:prBody(day,dryRun)});
@@ -234,4 +247,4 @@ if(require.main===module)runAutomation().then(result=>console.log(result.state))
   const allowed=/^(GITHUB_\d{3}|GITHUB_GRAPHQL_FAILURE|REQUIRED_CHECK_FAILED|CHECK_WAIT_TIMEOUT|MERGEABILITY_UNKNOWN|PAGINATION_BOUND)$/;
   console.error(allowed.test(error.message)?error.message:safeFailure(error));process.exitCode=1;
 });
-module.exports={REPO,APP,BOT,BRANCH_PREFIX,WORKFLOW,CHECKS,MARKER,machineBranch,assertExecution,identify,selectOpen,requiredChecks,prBody,GitHub,validateRemotePR,getPR,cleanup,finishPR,runAutomation};
+module.exports={REPO,APP,BOT,BRANCH_PREFIX,WORKFLOW,CHECKS,MARKER,cyclePrefix,machineBranch,assertExecution,identify,selectOpen,requiredChecks,prBody,GitHub,validateRemotePR,getPR,cleanup,finishPR,runAutomation};

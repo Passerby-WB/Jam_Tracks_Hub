@@ -216,9 +216,17 @@ stages the workflow checkout or local artifacts.
 
 ### PR lifecycle and safe stops
 
-Branches use `automation/umami-readme-snapshot-YYYY-MM-DD`. One fixed concurrency
-group, with cancellation disabled, serializes writers. At most one machine PR may
-be open; the next valid changed snapshot updates that same branch with a normal
+Production branches use `automation/umami-readme-snapshot-production-YYYY-MM-DD`;
+dry-run branches use `automation/umami-readme-snapshot-dry-run-YYYY-MM-DD`.
+Branch namespace and PR mode must agree. PR selection, closed-cycle suppression
+and cleanup are isolated by mode: dry-run state never blocks or becomes a
+production cycle, and production state is never reused by dry-run. Historical
+closed date-only branches are classified by their explicit PR mode; they are
+never reused or cleaned by the new writer. Historical production rejections
+still retain the same identical-content and same-date suppression policy.
+One fixed concurrency group, with cancellation disabled, serializes writers.
+At most one production snapshot PR and one separate dry-run PR may be open;
+the next valid changed snapshot updates its same-mode branch with a normal
 fast-forward commit and new CI. It never force-pushes or resets a branch.
 
 Fresh main is checked before writes. Conflicts, unexpected authors/files, unknown
