@@ -293,6 +293,17 @@ docs/SUBSCRIBE_SETUP.md
 - SEO and sharing previews for each tool page, especially Progression Writer.
 - Full light/dark consistency sweep for forms, modals, hover states, disabled states, downloads, and selections.
 
-## License And Ownership
+## License
 
-Jam Tracks Hub is maintained by Jasper Hsu. Original tracks, images, and exported practice assets belong to Jam Tracks Hub unless otherwise noted.
+Jam Tracks Hub uses a split licensing model. Original source code and software components are available under the [MIT License](LICENSE), except where otherwise noted. Repository-level MIT license detection applies only to that covered software and does not extend to the excluded content below.
+
+| Material | License / Rights |
+| --- | --- |
+| Source code and software components | [MIT License](LICENSE), except where otherwise noted |
+| Audio files and backing tracks | All rights reserved unless separately licensed |
+| Downloadable ZIP/PDF music resources | All rights reserved unless separately licensed |
+| Images and artwork | All rights reserved unless separately licensed |
+| Jam Tracks Hub logos, wordmarks, and other brand assets | All rights reserved; no trademark or brand-use rights granted |
+| Third-party materials | Their respective licenses and copyright terms |
+
+See [Content and Brand Rights](LICENSE-CONTENT.md) for the complete scope and exclusions.
