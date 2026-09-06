@@ -2,6 +2,7 @@ const fs = require("fs");
 const path = require("path");
 
 const { SnapshotError, IMAGE, decodePng, buildSnapshot, safeFailure } = require("./umami-snapshot-contract");
+const { requireShareCredential } = require("./umami-share-security");
 
 async function findTrafficChartElement(page) {
   const handle = await page.evaluateHandle(() => {
@@ -172,7 +173,8 @@ async function generateSnapshot({ readme, previousImage, shareUrl, now = new Dat
 }
 async function main() {
   const root = process.cwd();
-  const result = await generateSnapshot({ readme: fs.readFileSync(path.join(root, "README.md"), "utf8"), previousImage: fs.readFileSync(path.join(root, IMAGE)), shareUrl: process.env.UMAMI_SHARE_URL });
+  const shareUrl = requireShareCredential(process.env.UMAMI_SHARE_URL);
+  const result = await generateSnapshot({ readme: fs.readFileSync(path.join(root, "README.md"), "utf8"), previousImage: fs.readFileSync(path.join(root, IMAGE)), shareUrl });
   // CLI is for local generation only. Workflow publication is handled separately.
   for (const file of result.files) {
     const target = path.join(root, file.path);

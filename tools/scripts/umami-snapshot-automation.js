@@ -3,6 +3,7 @@
 // Executed from the workflow checkout, never from a machine PR's code.
 const { buildSnapshot, decodePng, validateFiles, validateReadme, snapshotDate, validDate, IMAGE, PREFIX, requireValid, safeFailure } = require("./umami-snapshot-contract");
 const { captureScreenshot } = require("./update-umami-readme-screenshot");
+const { MISSING_SECRET_FAILURE, ShareCredentialError, requireShareCredential } = require("./umami-share-security");
 const REPO = "Jasper-hsury/Jam_Tracks_Hub";
 const APP = "jam-tracks-hub-umami-snapshot-bot";
 const BOT = `${APP}[bot]`;
@@ -185,7 +186,8 @@ async function finishPR(api, number, sha, dryRun, wait=sleep) {
   }
   throw new Error("CHECK_WAIT_TIMEOUT");
 }
-async function runAutomation({env=process.env, api, capture=captureScreenshot, wait=sleep, now=new Date().toISOString()}={}) {
+async function runAutomation({env=process.env, api, capture=captureScreenshot, wait=sleep, now=new Date().toISOString(), report=console.log}={}) {
+  const shareUrl=requireShareCredential(env.UMAMI_SHARE_URL);
   assertExecution(env);
   api ||= new GitHub(env.UMAMI_APP_TOKEN,env.UMAMI_READ_TOKEN);
   const dryRun=env.UMAMI_DRY_RUN==="true", day=snapshotDate(now);
@@ -198,7 +200,7 @@ async function runAutomation({env=process.env, api, capture=captureScreenshot, w
     if(pr.auto_merge) await api.mutate("disablePullRequestAutoMerge",{pullRequestId:pr.node_id});
   }
   const base=pr ? pr.head.sha : main.object.sha;
-  const image=await capture(env.UMAMI_SHARE_URL);
+  const image=await capture(shareUrl);
   const snapshot=buildSnapshot({readme:(await api.blob(base,"README.md")).toString(),previousImage:await api.blob(base,IMAGE),image,now});
   if(snapshot.state==="UNCHANGED") {
     // A dry-run retry may finish checks/cleanup of its existing test PR without
@@ -240,11 +242,17 @@ async function runAutomation({env=process.env, api, capture=captureScreenshot, w
   else await api.write("POST","git/refs",{ref:`refs/heads/${branch}`,sha:commit.sha});
   if(pr) await api.write("PATCH",`pulls/${pr.number}`,{title:TITLE,body:prBody(day,dryRun)});
   else pr=await api.write("POST","pulls",{title:TITLE,head:branch,base:"main",body:prBody(day,dryRun),maintainer_can_modify:false});
-  console.log(`SNAPSHOT_PR=${pr.number}`);
+  report(`SNAPSHOT_PR=${pr.number}`);
   return {state:await finishPR(api,pr.number,commit.sha,dryRun,wait),pr:pr.number};
 }
-if(require.main===module)runAutomation().then(result=>console.log(result.state)).catch(error=>{
+function safeAutomationFailure(error) {
+  if(error instanceof ShareCredentialError)return MISSING_SECRET_FAILURE;
   const allowed=/^(GITHUB_\d{3}|GITHUB_GRAPHQL_FAILURE|REQUIRED_CHECK_FAILED|CHECK_WAIT_TIMEOUT|MERGEABILITY_UNKNOWN|PAGINATION_BOUND)$/;
-  console.error(allowed.test(error.message)?error.message:safeFailure(error));process.exitCode=1;
-});
-module.exports={REPO,APP,BOT,BRANCH_PREFIX,WORKFLOW,CHECKS,MARKER,cyclePrefix,machineBranch,assertExecution,identify,selectOpen,requiredChecks,prBody,GitHub,validateRemotePR,getPR,cleanup,finishPR,runAutomation};
+  return allowed.test(error?.message)?error.message:safeFailure(error);
+}
+async function runCli({execute=runAutomation,log=console.log,error=console.error}={}) {
+  try { const result=await execute();log(result.state);return 0; }
+  catch(failure) { error(safeAutomationFailure(failure));return 1; }
+}
+if(require.main===module)runCli().then(code=>{process.exitCode=code;});
+module.exports={REPO,APP,BOT,BRANCH_PREFIX,WORKFLOW,CHECKS,MARKER,cyclePrefix,machineBranch,assertExecution,identify,selectOpen,requiredChecks,prBody,GitHub,validateRemotePR,getPR,cleanup,finishPR,runAutomation,safeAutomationFailure,runCli};
