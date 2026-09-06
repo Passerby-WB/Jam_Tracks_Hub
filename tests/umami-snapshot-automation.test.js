@@ -3,9 +3,12 @@ const assert=require("node:assert/strict");
 const fs=require("node:fs");
 const a=require("../tools/scripts/umami-snapshot-automation");
 const c=require("../tools/scripts/umami-snapshot-contract");
+const security=require("../tools/scripts/umami-share-security");
 const SHA="a".repeat(40), BASE="b".repeat(40), SOURCE="c".repeat(40);
+const SYNTHETIC_TOKEN="SYNTHETIC_SECRET_SENTINEL";
+const SYNTHETIC_URL=`https://example.invalid/share/${SYNTHETIC_TOKEN}`;
 const image=fs.readFileSync(c.IMAGE);
-const env={GITHUB_REPOSITORY:a.REPO,UMAMI_APP_SLUG:a.APP,GITHUB_WORKFLOW_REF:`${a.REPO}/${a.WORKFLOW}@refs/heads/main`,GITHUB_REF:"refs/heads/main",GITHUB_EVENT_NAME:"schedule",UMAMI_DRY_RUN:"false",GITHUB_RUN_ID:"123",GITHUB_SHA:SOURCE};
+const env={GITHUB_REPOSITORY:a.REPO,UMAMI_APP_SLUG:a.APP,GITHUB_WORKFLOW_REF:`${a.REPO}/${a.WORKFLOW}@refs/heads/main`,GITHUB_REF:"refs/heads/main",GITHUB_EVENT_NAME:"schedule",UMAMI_DRY_RUN:"false",GITHUB_RUN_ID:"123",GITHUB_SHA:SOURCE,UMAMI_SHARE_URL:SYNTHETIC_URL};
 const before=`outside\n${c.readmeBlock("2026-09-03")}\nend`;
 const after=`outside\n${c.readmeBlock("2026-09-06")}\nend`;
 function pr(dryRun=false){return {number:41,node_id:"PR_test",title:"chore: refresh Umami analytics snapshot",state:"open",draft:false,mergeable:true,merged:false,changed_files:3,body:a.prBody("2026-09-06",dryRun),user:{login:a.BOT,type:"Bot"},base:{ref:"main",repo:{full_name:a.REPO}},head:{ref:`${a.cyclePrefix(dryRun)}2026-09-06`,sha:SHA,repo:{full_name:a.REPO}},auto_merge:null};}
@@ -265,4 +268,86 @@ test("workflow confines write token and triggers, locks Node/Playwright, seriali
   assert.match(y,/repositories: Jam_Tracks_Hub/);assert.match(y,/UMAMI_SNAPSHOT_APP_PRIVATE_KEY/);assert.match(y,/persist-credentials: false/);assert.match(y,/node-version: 22\.23\.2/);assert.match(y,/npm ci/);assert.doesNotMatch(y,/npm install --no-save/);
   assert.doesNotMatch(s,/mergePullRequest\b|\/merge["'`]|force:\s*true|admin:\s*true/);
   assert.equal(require("../package.json").devDependencies.playwright,"1.63.0");
+});
+
+test("workflow uses the Share URL only as a repository secret with early explicit masking",()=>{
+  const y=fs.readFileSync(".github/workflows/umami-readme-screenshot.yml","utf8");
+  assert.equal((y.match(/UMAMI_SHARE_URL:/g)||[]).length,2);
+  assert.equal((y.match(/secrets\.UMAMI_SHARE_URL/g)||[]).length,2);
+  assert.doesNotMatch(y,/vars\.UMAMI_SHARE_URL|GITHUB_OUTPUT|GITHUB_ENV|::set-output/);
+  assert.match(y,/Validate and mask protected Umami Share secret[\s\S]+run: node tools\/scripts\/umami-share-security\.js/);
+  assert.ok(y.indexOf("Validate and mask protected Umami Share secret")<y.indexOf("Install locked dependencies and Chromium"));
+  assert.ok(y.indexOf("Validate and mask protected Umami Share secret")<y.indexOf("Create repository-only App installation token"));
+  assert.doesNotMatch(y,/run:\s*(?:env|printenv|set(?:\s+-x)?)(?:\s|$)/m);
+});
+
+test("missing Share secret fails before API, capture, branch, PR, or auto-merge activity",async()=>{
+  let touched=false;
+  const api=new Proxy({}, {get(){touched=true;throw new Error("API_MUST_NOT_BE_TOUCHED");}});
+  await assert.rejects(
+    a.runAutomation({env:{...env,UMAMI_SHARE_URL:""},api,capture:async()=>{touched=true;return image;}}),
+    error=>error instanceof security.ShareCredentialError && error.message===security.MISSING_SECRET_FAILURE
+  );
+  assert.equal(touched,false);
+  assert.equal(a.safeAutomationFailure(new Error(SYNTHETIC_URL)),"VALIDATION_FAILURE");
+});
+
+function runnerLogCapture() {
+  const masks=[],stdout=[],stderr=[];
+  const decode=value=>value.replace(/%0D/g,"\r").replace(/%0A/g,"\n").replace(/%25/g,"%");
+  const redact=value=>masks.reduce((text,mask)=>text.split(mask).join("***"),String(value));
+  const write=(channel,chunk)=>{
+    const command=String(chunk).match(/^::add-mask::([^\r\n]*)\r?\n$/);
+    if(command){masks.push(decode(command[1]));return;}
+    channel.push(redact(chunk));
+  };
+  return {masks,stdout,stderr,writeStdout:chunk=>write(stdout,chunk),writeStderr:chunk=>write(stderr,chunk)};
+}
+
+test("mask registration is the only raw protocol handling and runner-rendered logs redact the capability",()=>{
+  const log=runnerLogCapture();
+  security.registerShareMask(SYNTHETIC_URL,log.writeStdout);
+  log.writeStdout(`diagnostic ${SYNTHETIC_URL}\n`);
+  assert.deepEqual(log.masks,[SYNTHETIC_URL]);
+  assert.equal(log.stdout.join(""),"diagnostic ***\n");
+  assert.equal(log.stderr.join(""),"");
+});
+
+test("complete synthetic outcome logs never expose full or derived Share identifiers",async()=>{
+  const cases=[
+    ["SUCCESS",async()=>({state:"SUCCESS"})],
+    ["UPDATED",async()=>({state:"UPDATED"})],
+    ["NO_DIFF",async()=>({state:"UNCHANGED"})],
+    ["FETCH_FAILURE",async()=>{throw new c.SnapshotError("FETCH_FAILURE");}],
+    ["INVALID_DASHBOARD",async()=>{throw new c.SnapshotError("INVALID_DASHBOARD");}],
+    ["SCREENSHOT_FAILURE",async()=>{throw new c.SnapshotError("SCREENSHOT_FAILURE");}],
+    ["VALIDATION_FAILURE",async()=>{throw new Error(`validation at ${SYNTHETIC_URL}`);}],
+    ["MISSING_SECRET",async()=>a.runAutomation({env:{...env,UMAMI_SHARE_URL:""},api:{}})]
+  ];
+  for(const [name,execute] of cases) {
+    const log=runnerLogCapture();
+    security.registerShareMask(SYNTHETIC_URL,log.writeStdout);
+    await a.runCli({execute,log:value=>log.writeStdout(`${value}\n`),error:value=>log.writeStderr(`${value}\n`)});
+    const complete=`${log.stdout.join("")}\n${log.stderr.join("")}`;
+    assert.doesNotMatch(complete,new RegExp(SYNTHETIC_TOKEN),name);
+    assert.doesNotMatch(complete,/\/share\/SYNTHETIC_SECRET_SENTINEL/,name);
+    assert.doesNotMatch(complete,/example\.invalid/,name);
+  }
+});
+
+test("synthetic Share capability never reaches generated or remote output channels",async()=>{
+  const api=lifecycle(),reported=[];
+  const result=await a.runAutomation({
+    env:{...env,UMAMI_DRY_RUN:"true"},api,capture:async value=>{assert.equal(value,SYNTHETIC_URL);return image;},
+    now:"2026-09-06",wait:async()=>{},report:value=>reported.push(value)
+  });
+  assert.equal(result.state,"DRY_RUN_PASS");
+  const channels=[...reported,a.prBody("2026-09-06",true)];
+  for(const write of api.writes) {
+    channels.push(JSON.stringify(write));
+    if(write.path==="git/blobs")channels.push(Buffer.from(write.body.content,"base64").toString("utf8"));
+  }
+  const complete=channels.join("\n");
+  assert.doesNotMatch(complete,new RegExp(SYNTHETIC_TOKEN));
+  assert.doesNotMatch(complete,/example\.invalid|\/share\/SYNTHETIC_SECRET_SENTINEL/);
 });
